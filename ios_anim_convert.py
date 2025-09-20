@@ -48,6 +48,7 @@ def load_frames(path: Path) -> Tuple[List[Image.Image], List[int]]:
             dur = 100
         frames.append(frame.copy())
         durs.append(int(dur))
+        durs = [int(max(1, d)) for d in durs]  # ensure positive ints
     if not frames:
         frames = [img.convert("RGBA")]
         durs = [500]
@@ -77,11 +78,18 @@ def save_frames_to_pngs(
     return paths
 
 
-def build_apng(paths: List[Path], durations_ms: List[int], outpath: Path):
+def build_apng(paths, durations_ms, outpath, num_plays=0):
     apng = APNG()
-    # APNG uses delay as (num, den). Use denominator=1000 for ms precision.
     for p, dur in zip(paths, durations_ms):
-        apng.append_file(str(p), delay=(dur, 1000))
+        apng.append_file(
+            str(p),
+            delay=(int(dur), 1000),  # ms
+            x_offset=0,  # be explicit; some apng versions default to None
+            y_offset=0,
+            dispose_op=0,
+            blend_op=0,
+        )
+    apng.num_plays = int(num_plays)  # 0 = loop forever
     apng.save(str(outpath))
 
 
@@ -128,7 +136,25 @@ def make_ios_sticker(infile: Path, out_apng: Path, size_choice: str):
             for colors in color_steps:
                 qframes = [quantize_rgba(fr, colors) for fr in sized]
                 pngs = save_frames_to_pngs(qframes, tmp)
+
+                # If input isn't animated, just emit a static sticker (PNG),
+                # because some apng builds error on 1-frame APNGs.
+                if len(pngs) == 1:
+                    out_static = out_apng.with_suffix(".png")
+                    shutil.copy2(pngs[0], out_static)
+                    if not size_ok(out_static):
+                        # try re-saving once more with stronger compression
+                        Image.open(pngs[0]).save(
+                            out_static, format="PNG", optimize=True, compress_level=9
+                        )
+                    print(
+                        f"[OK] Static sticker created at {out_static} ({out_static.stat().st_size / 1024:.1f} KB)"
+                    )
+                    return
+
+                # Otherwise build a real APNG
                 build_apng(pngs, durs, out_apng)
+
                 if size_ok(out_apng):
                     print(
                         f"[OK] Sticker APNG created at {out_apng} ({out_apng.stat().st_size / 1024:.1f} KB, {px}px, {colors} colors)"
