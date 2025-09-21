@@ -79,18 +79,70 @@ def save_frames_to_pngs(
 
 
 def build_apng(paths, durations_ms, outpath, num_plays=0):
-    apng = APNG()
-    for p, dur in zip(paths, durations_ms):
-        apng.append_file(
-            str(p),
-            delay=(int(dur), 1000),  # ms
-            x_offset=0,  # be explicit; some apng versions default to None
-            y_offset=0,
-            dispose_op=0,
-            blend_op=0,
-        )
-    apng.num_plays = int(num_plays)  # 0 = loop forever
-    apng.save(str(outpath))
+    """
+    Version-proof APNG builder:
+      - Forces all fcTL fields to ints.
+      - Supports both 'delay=(num, den)' and 'delay_num/delay_den'.
+      - Only passes kwargs that exist in your installed 'apng' FrameControl.
+    """
+    from inspect import signature
+
+    from apng import APNG, FrameControl
+    from PIL import Image
+
+    ap = APNG()
+    fc_params = set(signature(FrameControl.__init__).parameters.keys())
+
+    # Ensure integer, positive delays; pad if needed
+    durs = [int(max(1, d)) for d in (durations_ms or [100])]
+    if len(durs) < len(paths):
+        durs += [durs[-1]] * (len(paths) - len(durs))
+
+    for p, dur in zip(paths, durs):
+        # Read width/height from the actual PNG file (safe for all versions)
+        with Image.open(p) as _im:
+            w, h = _im.size
+
+        opts = {}
+
+        # width/height make sure fcTL has explicit ints
+        if "width" in fc_params:
+            opts["width"] = int(w)
+        if "height" in fc_params:
+            opts["height"] = int(h)
+
+        # delay variants - check what the actual library supports
+        if "delay" in fc_params:
+            opts["delay"] = int(dur)  # Single integer, not tuple
+        else:
+            if "delay_num" in fc_params:
+                opts["delay_num"] = int(dur)
+            if "delay_den" in fc_params:
+                opts["delay_den"] = 1000
+
+        # positional offsets
+        if "x_offset" in fc_params:
+            opts["x_offset"] = int(0)
+        if "y_offset" in fc_params:
+            opts["y_offset"] = int(0)
+
+        # ops (check for actual parameter names)
+        if "dispose_op" in fc_params:
+            opts["dispose_op"] = int(0)
+        elif "depose_op" in fc_params:  # Handle typo in some versions
+            opts["depose_op"] = int(0)
+        if "blend_op" in fc_params:
+            opts["blend_op"] = int(0)
+
+        ap.append_file(str(p), **opts)
+
+    # num_plays supported on all maintained versions; guard anyway
+    try:
+        ap.num_plays = int(num_plays)  # 0 = loop forever
+    except Exception:
+        pass
+
+    ap.save(str(outpath))
 
 
 def size_ok(path: Path, max_kb=500) -> bool:
@@ -124,7 +176,12 @@ def make_ios_sticker(infile: Path, out_apng: Path, size_choice: str):
                 # Split long tuple construction to satisfy 79-char limit
                 new_w = max(1, int(f.width * ratio))
                 new_h = max(1, int(f.height * ratio))
-                resized = f.resize((new_w, new_h), Image.LANCZOS)
+                # Use Resampling.LANCZOS for newer Pillow versions
+                try:
+                    resized = f.resize((new_w, new_h), Image.Resampling.LANCZOS)
+                except AttributeError:
+                    # Fallback for older Pillow versions
+                    resized = f.resize((new_w, new_h), Image.LANCZOS)
                 canvas = Image.new("RGBA", (px, px), (0, 0, 0, 0))
                 canvas.paste(
                     resized,
